@@ -6,7 +6,6 @@
 /.next
 
 # Environment variables
-.env
 
 # Misc
 .DS_Store
@@ -32,3 +31,4 @@ override.tf.json
 __pycache__/
 *.py[cod]
 *$py.class
+config.bat
