@@ -31,8 +31,8 @@ except ImportError:
             def call(transaction):
                 return b'\x00' * 32
             
-            @staticmethod
-            def chain_id:
+            @property
+            def chain_id(self):
                 return 1
     
     Web3 = MockWeb3
@@ -112,6 +112,18 @@ VULNERABLE_PATTERNS = {
 }
 
 
+def _process_bytecode(bytecode) -> Tuple[str, str, str]:
+    """Helper to convert bytecode bytes or str to hex, text, and combined representations."""
+    if isinstance(bytecode, bytes):
+        bytecode_hex = bytecode.hex().lower()
+        bytecode_text = bytecode.decode('utf-8', errors='ignore').lower()
+    else:
+        bytecode_hex = str(bytecode).lower()
+        bytecode_text = str(bytecode).lower()
+    combined = f"{bytecode_hex} {bytecode_text}"
+    return bytecode_hex, bytecode_text, combined
+
+
 class PermitFunctionDetector:
     """Detects permit functions in contract bytecode"""
     
@@ -136,16 +148,19 @@ class PermitFunctionDetector:
         try:
             # Get contract bytecode
             bytecode = self.web3.eth.get_code(contract_address)
-            bytecode_hex = bytecode.hex()
+            bytecode_hex, bytecode_text, combined = _process_bytecode(bytecode)
             
+            permit_selector = PERMIT_FUNCTION_SELECTORS["permit"].replace("0x", "").lower()
+            domain_selector = PERMIT_FUNCTION_SELECTORS["DOMAIN_SEPARATOR"].replace("0x", "").lower()
+
             # Check for EIP-2612 permit function
-            if PERMIT_FUNCTION_SELECTORS["permit"] in bytecode_hex:
-                permit_info = self._analyze_permit_implementation(bytecode_hex, contract_address)
+            if permit_selector in combined:
+                permit_info = self._analyze_permit_implementation(combined, contract_address)
                 permit_functions.append(permit_info)
             
             # Check for DOMAIN_SEPARATOR function
-            if PERMIT_FUNCTION_SELECTORS["DOMAIN_SEPARATOR"] in bytecode_hex:
-                domain_info = self._analyze_domain_separator(bytecode_hex, contract_address)
+            if domain_selector in combined:
+                domain_info = self._analyze_domain_separator(combined, contract_address)
                 if domain_info:
                     permit_functions.append(domain_info)
             
@@ -182,7 +197,8 @@ class PermitFunctionDetector:
     
     def _has_domain_separator(self, bytecode_hex: str) -> bool:
         """Check if contract has domain separator functionality"""
-        return PERMIT_FUNCTION_SELECTORS["DOMAIN_SEPARATOR"] in bytecode_hex
+        domain_selector = PERMIT_FUNCTION_SELECTORS["DOMAIN_SEPARATOR"].replace("0x", "").lower()
+        return domain_selector in bytecode_hex.lower() or "domain_separator" in bytecode_hex.lower()
     
     def _has_chain_id_validation(self, bytecode_hex: str) -> bool:
         """Check if contract properly validates chain ID"""
@@ -275,14 +291,14 @@ class NonceAnalyzer:
         try:
             # Get contract bytecode
             bytecode = self.web3.eth.get_code(contract_address)
-            bytecode_hex = bytecode.hex()
+            bytecode_hex, bytecode_text, combined = _process_bytecode(bytecode)
             
             # Check for nonces mapping
-            if "nonces" in bytecode_hex.lower():
+            if "nonces" in combined.lower():
                 nonce_info.has_nonces_mapping = True
-                nonce_info.tracks_per_address = self._tracks_per_address(bytecode_hex)
-                nonce_info.nonce_increment_pattern = self._analyze_nonce_increment_pattern(bytecode_hex)
-                nonce_info.nonce_storage_slot = self._estimate_nonce_storage_slot(bytecode_hex)
+                nonce_info.tracks_per_address = self._tracks_per_address(combined)
+                nonce_info.nonce_increment_pattern = self._analyze_nonce_increment_pattern(combined)
+                nonce_info.nonce_storage_slot = self._estimate_nonce_storage_slot(combined)
             
         except Exception as e:
             print(f"Error analyzing nonce implementation: {e}")
@@ -417,14 +433,14 @@ class DeadlineAnalyzer:
         try:
             # Get contract bytecode
             bytecode = self.web3.eth.get_code(contract_address)
-            bytecode_hex = bytecode.hex()
+            bytecode_hex, bytecode_text, combined = _process_bytecode(bytecode)
             
             # Check for deadline validation
-            if "deadline" in bytecode_hex.lower():
+            if "deadline" in combined.lower():
                 deadline_info["has_deadline_check"] = True
-                deadline_info["deadline_validation_type"] = self._get_deadline_validation_type(bytecode_hex)
-                deadline_info["comparator_used"] = self._get_deadline_comparator(bytecode_hex)
-                deadline_info["reverts_on_expiry"] = self._check_revert_on_expiry(bytecode_hex)
+                deadline_info["deadline_validation_type"] = self._get_deadline_validation_type(combined)
+                deadline_info["comparator_used"] = self._get_deadline_comparator(combined)
+                deadline_info["reverts_on_expiry"] = self._check_revert_on_expiry(combined)
                 
                 # Check for vulnerabilities
                 if deadline_info["comparator_used"] == ">=":
@@ -504,16 +520,17 @@ class EcrecoverAnalyzer:
         try:
             # Get contract bytecode
             bytecode = self.web3.eth.get_code(contract_address)
-            bytecode_hex = bytecode.hex()
+            bytecode_hex, bytecode_text, combined = _process_bytecode(bytecode)
             
-            # Check for ecrecover usage
-            if "ecrecover" in bytecode_hex.lower():
+            ecrecover_info["validates_signer"] = self._validates_signer(combined)
+            ecrecover_info["checks_zero_address"] = self._checks_zero_address(combined)
+            ecrecover_info["zero_address_handling"] = self._get_zero_address_handling(combined)
+
+            if "ecrecover" in combined.lower() or ecrecover_info["validates_signer"] or ecrecover_info["checks_zero_address"]:
                 ecrecover_info["uses_ecrecover"] = True
-                ecrecover_info["validates_signer"] = self._validates_signer(bytecode_hex)
-                ecrecover_info["checks_zero_address"] = self._checks_zero_address(bytecode_hex)
-                ecrecover_info["zero_address_handling"] = self._get_zero_address_handling(bytecode_hex)
-                
-                # Check for vulnerabilities
+
+            # Check for vulnerabilities if ecrecover is used
+            if ecrecover_info["uses_ecrecover"]:
                 if not ecrecover_info["checks_zero_address"]:
                     ecrecover_info["vulnerabilities"].append("missing_zero_address_check")
                 if ecrecover_info["zero_address_handling"] == "accepts":
